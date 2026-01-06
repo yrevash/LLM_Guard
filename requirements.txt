@@ -93,3 +93,15 @@
     virtualenv==20.31.2
     yamllint==1.35.1
     fastapi
+    fastapi
+    uvicorn[standard]
+    transformers
+    torch
+    pillow
+    requests
+    opencv-python
+    pydantic
+    # Optional runtime helpers
+    accelerate
+    safetensors
+

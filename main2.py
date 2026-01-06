@@ -6,7 +6,7 @@ import tempfile
 import requests
 from PIL import Image
 from io import BytesIO
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
@@ -33,7 +33,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# device = torch.device("cpu")
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CATEGORIES = {
@@ -49,7 +49,6 @@ CATEGORIES = {
     "NA: None applying": "Safe content"
 }
 
-# Reduced generation args for faster response
 generation_args = {
     "max_new_tokens": 10,
     "do_sample": False,
@@ -64,21 +63,35 @@ nsfw_processor = None
 nsfw_model = None
 
 
+# Standard Response Model
+class StandardResponse(BaseModel):
+    success: bool
+    data: Optional[Any]
+    message: str
+
+
 class URLRequest(BaseModel):
+    post_id: str
     url: HttpUrl
 
+
 class SafetyResponse(BaseModel):
+    post_id: str
     rating: str
     category: str
 
+
 class TextRequest(BaseModel):
+    post_id: str
     text: str
+
 
 def format_category(category: str) -> str:
     """Convert category from 'O1' format to '1' format, or keep 'NA' as is."""
     if category.startswith("O") and len(category) == 2 and category[1].isdigit():
         return category[1]
     return category
+
 
 @app.on_event("startup")
 def load_models():
@@ -87,21 +100,23 @@ def load_models():
     print("Loading LLavaGuard model...")
     llava_model_id = "AIML-TUDA/LlavaGuard-v1.2-0.5B-OV-hf"
     llava_model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-    llava_model_id,
-    torch_dtype=torch.float16 if device.type == "cuda" else torch.float32
+        llava_model_id,
+        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32
     ).to(device)
 
     llava_processor = AutoProcessor.from_pretrained(llava_model_id)
 
     print("Loading BART classifier...")
     classifier = pipeline(
-    "zero-shot-classification",
-    model="facebook/bart-large-mnli",
-    device=0 if device.type == "cuda" else -1
+        "zero-shot-classification",
+        model="facebook/bart-large-mnli",
+        device=0 if device.type == "cuda" else -1
     )
+    
     print("Loading NSFW model...")
     nsfw_processor = AutoImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
     nsfw_model = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection").to(device)
+
 
 def predict_nsfw(image: Image.Image):
     inputs = nsfw_processor(images=image, return_tensors="pt")
@@ -131,6 +146,7 @@ def get_llava_output(image, text=""):
         output = llava_model.generate(**inputs, **generation_args)
     return llava_processor.decode(output[0], skip_special_tokens=True).strip()
 
+
 def classify_safety(explanation: str) -> Dict[str, Any]:
     result = classifier(explanation, list(CATEGORIES.values()), multi_label=True)
     best_score = 0
@@ -141,13 +157,11 @@ def classify_safety(explanation: str) -> Dict[str, Any]:
             return {"rating": "safe", "category": "NA"}
         elif score > best_score and score > 0.4:
             best_score = score
-            # Extract category key from the label
             for key, value in CATEGORIES.items():
                 if value == label:
-                    best_category = key.split(":")[0]  # Get "O1", "O2", etc.
+                    best_category = key.split(":")[0]
                     break
     
-    # Format the category before returning
     formatted_category = format_category(best_category)
     
     return {
@@ -155,60 +169,119 @@ def classify_safety(explanation: str) -> Dict[str, Any]:
         "category": formatted_category
     }
 
+
 def classify_image_internal(image: Image.Image):
     explanation = get_llava_output(image)
     safety = classify_safety(explanation)
     return safety
 
+
 @app.get("/")
 def root():
-    return {"message": "Unified NSFW + Safety API is running"}
+    return {
+        "success": True,
+        "data": {},
+        "message": "Unified NSFW + Safety API is running"
+    }
+
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "models_loaded": all([llava_model, classifier, nsfw_model])}
+    return {
+        "success": True,
+        "data": {
+            "status": "healthy",
+            "models_loaded": all([llava_model, classifier, nsfw_model])
+        },
+        "message": "health_check_successfully"
+    }
+
 
 @app.get("/categories")
 def get_categories():
-    # Return categories with simplified format
     simplified_categories = {}
     for key, value in CATEGORIES.items():
         if key.startswith("O"):
-            simplified_key = key[1]  # Extract just the number
+            simplified_key = key[1]
             simplified_categories[simplified_key] = value
         else:
             simplified_categories["NA"] = value
-    return {"categories": simplified_categories}
+    
+    return {
+        "success": True,
+        "data": {
+            "categories": simplified_categories
+        },
+        "message": "categories_reterived_successfully"
+	    }
 
-@app.post("/classify/image", response_model=SafetyResponse)
+
+@app.post("/classify/image")
 async def classify_image_url(req: URLRequest):
     try:
         headers = {
-            
-
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-
         }
-        response = requests.get(req.url,headers=headers)
+        response = requests.get(req.url, headers=headers)
         response.raise_for_status()
         image = Image.open(io.BytesIO(response.content)).convert("RGB")
+        
+        result = classify_image_internal(image)
+        
+        return {
+            "success": True,
+            "data": {
+                "post_id": req.post_id,
+                "rating": result["rating"],
+                "category": result["category"]
+            },
+            "message": "image_classification_successfull"
+        }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load image from URL. Error: {e}")
-    
-    result = classify_image_internal(image)
-    return SafetyResponse(**result)
+        return {
+            "success": False,
+            "data": None,
+            "message": "failed_to_load_images"
+        }
 
-@app.post("/classify/text", response_model=SafetyResponse)
+
+@app.post("/classify/text")
 async def classify_text(text_req: TextRequest):
-    dummy_image = Image.new("RGB", (224, 224), color=(255, 255, 255))
-    explanation = get_llava_output(dummy_image, text_req.text)
-    result = classify_safety(explanation)
-    return SafetyResponse(**result)
+    try:
+        dummy_image = Image.new("RGB", (224, 224), color=(255, 255, 255))
+        explanation = get_llava_output(dummy_image, text_req.text)
+        result = classify_safety(explanation)
+        
+        return {
+            "success": True,
+            "data": {
+                "post_id": text_req.post_id,
+                "rating": result["rating"],
+                "category": result["category"]
+            },
+            "message": "text_classification_successfull"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "data": None,
+            "message": "failed_to_classify_text"
+        }
 
-@app.post("/classify/video", response_model=SafetyResponse)
+
+@app.post("/classify/video")
 async def classify_video(req: URLRequest):
     try:
-        response = requests.get(req.url, timeout=10, stream=True)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            "Referer": "https://qoneqt.com", 
+            "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        }
+        
+        response = requests.get(req.url, headers=headers, timeout=30, stream=True)
         response.raise_for_status()
 
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -222,15 +295,32 @@ async def classify_video(req: URLRequest):
             os.unlink(tmp.name)
 
             if not success:
-                raise HTTPException(status_code=500, detail="Failed to read video frame.")
+                return {
+                    "success": False,
+                    "data": None,
+                    "message": "failed_to_read_video_frame"
+                }
 
             pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             result = classify_image_internal(pil_image)
-            return SafetyResponse(**result)
+            
+            return {
+                "success": True,
+                "data": {
+                    "post_id": req.post_id,
+                    "rating": result["rating"],
+                    "category": result["category"]
+                },
+                "message": "video_classification_successfull"
+            }
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load video: {e}")
+        return {
+            "success": False,
+            "data": None,
+            "message": "failed_to_load_video"
+        }
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main2:app", host="0.0.0.0", port=8102, reload=False)
