@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-03-24T17:59:22.396343",
+  "endpoint": "/classify/text",
+  "request": {
+    "text": "Online work Koro ge payment garenty denge 2min kam koro ge 500Rs denge WhatssApp par sms kijiye."
+  },
+  "response": {
+    "success": true,
+    "data": {
+      "post_id": null,
+      "comment_id": "152",
+      "message_id": null,
+      "rating": "unsafe",
+      "category": "11"
+    },
+    "message": "success"
+  }
+}
+================================================================================
